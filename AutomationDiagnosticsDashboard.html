@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Automation Diagnostics</title>
+
+<script runat="server">
+Platform.Load("core", "1.1.5");
+
+var output = {
+  automations : [],
+  instances   : [],
+  debug       : {},
+  error       : null
+};
+
+/*
+  Correct pagination pattern for WSProxy:
+  Pass ContinueRequest inside the props object on subsequent calls,
+*/
+function retrieveAll(api, objectType, cols, filter) {
+  var rows = [];
+  var moreData = true;
+  var reqID = null;
+  var pages = 0;
+  var lastStatus = "unknown";
+
+  var opts  = { BatchSize: 250 };
+  var props = { QueryAllAccounts: false };
+
+  while (moreData) {
+    moreData = false;
+    if (reqID) props.ContinueRequest = reqID;
+
+    var resp;
+    try {
+      resp = filter
+        ? api.retrieve(objectType, cols, filter, opts, props)
+        : api.retrieve(objectType, cols, {}, opts, props);
+    } catch(ex) {
+      return { rows: rows, status: "retrieve_exception: " + ex.message, pages: pages };
+    }
+
+    if (!resp) break;
+    lastStatus = resp.Status || "unknown";
+    pages++;
+
+    if (resp.Results) {
+      for (var i = 0; i < resp.Results.length; i++) {
+        rows.push(resp.Results[i]);
+      }
+    }
+
+    if (resp.HasMoreRows) {
+      moreData = true;
+      reqID = resp.RequestID;
+    }
+
+    if (pages > 40) break; // safety valve
+  }
+
+  return { rows: rows, status: lastStatus, pages: pages };
+}
+
+try {
+  var api = new Script.Util.WSProxy();
+
+  /* ── 1. AUTOMATIONS ───────────────────────────────────────────────
+     Key field is ProgramID (= ObjectID alias).
+     Use Status IN [-1,0,1,2,3,4,5,6,7,8] to get everything.
+  ──────────────────────────────────────────────────────────────── */
+  var autoCols = [
+    "Name", "Description", "CustomerKey", "IsActive",
+    "CreatedDate", "ModifiedDate", "Status",
+    "ProgramID",          /* the primary GUID key for Automation */
+    "CategoryID",
+    "LastRunTime", "ScheduledTime", "LastSaveDate",
+    "AutomationType", "RecurrenceID"
+  ];
+
+  var autoFilter = {
+    Property: "Status",
+    SimpleOperator: "IN",
+    Value: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8]
+  };
+
+  var ar = retrieveAll(api, "Automation", autoCols, autoFilter);
+  output.automations = ar.rows;
+  output.debug.automations = { count: ar.rows.length, status: ar.status, pages: ar.pages };
+
+  /* ── 2. AUTOMATION INSTANCE (run history) ─────────────────────────
+     Filter on all instance statuses so we actually get rows back.
+     The linking key on AutomationInstance is TaskProgramID which
+     matches the Automation's ProgramID.
+  ──────────────────────────────────────────────────────────────── */
+  var instCols = [
+    "TaskProgramID", "Name", "Status", "StatusMessage",
+    "StartTime", "CompletedTime", "IsComplete", "InstanceID"
+  ];
+
+  var instFilter = {
+    Property: "Status",
+    SimpleOperator: "IN",
+    Value: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8]
+  };
+
+  var ir = retrieveAll(api, "AutomationInstance", instCols, instFilter);
+  output.instances = ir.rows;
+  output.debug.instances = { count: ir.rows.length, status: ir.status, pages: ir.pages };
+
+} catch(e) {
+  output.error = e.message;
+}
+
+Variable.SetValue("@jsonData", Stringify(output));
+</script>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+:root {
+  --bg:#0a0c0e; --bg-panel:#0f1215; --bg-card:#141820; --bg-hover:#1a2030;
+  --border:#1e2530; --border-hi:#2a3545;
+  --amber:#f59e0b; --amber-dim:#92600a;
+  --green:#22d3a0; --red:#f43f5e; --blue:#38bdf8; --purple:#a78bfa;
+  --gray:#4a5568; --gray-lt:#718096;
+  --txt:#e2e8f0; --txt2:#8892a4; --txt3:#4a5568;
+  --mono:'IBM Plex Mono',monospace; --sans:'IBM Plex Sans',sans-serif; --r:4px;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font-family:var(--sans);font-size:14px;line-height:1.6;min-height:100vh}
+body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.05) 2px,rgba(0,0,0,.05) 4px);pointer-events:none;z-index:9999}
+.shell{max-width:1440px;margin:0 auto;padding:0 24px 60px}
+
+/* Header */
+.header{border-bottom:1px solid var(--border);padding:22px 0 18px;display:flex;align-items:center;gap:18px}
+.hex{width:38px;height:38px;background:var(--amber);clip-path:polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);flex-shrink:0;animation:hexP 3s ease-in-out infinite}
+@keyframes hexP{0%,100%{opacity:1}50%{opacity:.7}}
+.ht{font-family:var(--mono);font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:var(--txt2)}
+.ht strong{display:block;font-size:20px;font-weight:700;color:var(--txt);letter-spacing:.04em;margin-bottom:2px}
+.hr{margin-left:auto;text-align:right;font-family:var(--mono);font-size:11px;color:var(--txt3)}
+.live{color:var(--green);font-weight:600;display:flex;align-items:center;gap:6px;justify-content:flex-end;margin-bottom:4px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:blink 1.4s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
+
+/* Debug bar */
+.dbgbar{font-family:var(--mono);font-size:11px;background:#0d1117;border:1px solid var(--border-hi);border-radius:var(--r);padding:9px 14px;margin:16px 0;color:var(--gray-lt);display:flex;gap:20px;flex-wrap:wrap;align-items:center}
+.dbgbar strong{color:var(--blue)}
+.dbglbl{color:var(--txt3);font-weight:700;letter-spacing:.1em;font-size:10px;text-transform:uppercase}
+.dbghide{margin-left:auto;background:none;border:1px solid var(--border-hi);color:var(--txt3);font-family:var(--mono);font-size:10px;padding:2px 8px;cursor:pointer;border-radius:2px}
+.dbghide:hover{color:var(--amber);border-color:var(--amber-dim)}
+
+/* Stats */
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;padding:22px 0 18px}
+.stat{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--r);padding:16px;cursor:pointer;position:relative;overflow:hidden;transition:background .2s,border-color .2s}
+.stat::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
+.stat.s-total::before{background:var(--blue)} .stat.s-run::before{background:var(--green)} .stat.s-err::before{background:var(--red)} .stat.s-pau::before{background:var(--amber)} .stat.s-off::before{background:var(--gray)}
+.stat:hover{background:var(--bg-card);border-color:var(--border-hi)}
+.slbl{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.13em;text-transform:uppercase;color:var(--txt3);margin-bottom:8px}
+.sval{font-family:var(--mono);font-size:34px;font-weight:700;line-height:1}
+.stat.s-total .sval{color:var(--blue)} .stat.s-run .sval{color:var(--green)} .stat.s-err .sval{color:var(--red)} .stat.s-pau .sval{color:var(--amber)} .stat.s-off .sval{color:var(--gray-lt)}
+.ssub{font-family:var(--mono);font-size:10px;color:var(--txt3);margin-top:5px}
+
+/* Toolbar */
+.toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:14px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-bottom:18px}
+.tlbl{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--txt3);margin-right:4px}
+.fbtn{font-family:var(--mono);font-size:11px;font-weight:500;padding:4px 13px;border-radius:2px;border:1px solid var(--border-hi);background:transparent;color:var(--txt2);cursor:pointer;transition:all .15s;letter-spacing:.06em}
+.fbtn:hover{border-color:var(--amber-dim);color:var(--amber)}
+.fbtn.on{border-color:var(--amber);color:var(--amber);background:rgba(245,158,11,.08)}
+.sw{margin-left:auto;position:relative}
+.sw input{background:var(--bg-panel);border:1px solid var(--border-hi);border-radius:2px;color:var(--txt);font-family:var(--mono);font-size:12px;padding:5px 12px 5px 28px;width:230px;outline:none;transition:border-color .15s}
+.sw input:focus{border-color:var(--amber-dim)}
+.sw input::placeholder{color:var(--txt3)}
+.sico{position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--txt3);font-size:13px}
+
+/* Panel / table */
+.panel{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;margin-bottom:24px}
+.ph{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg-card)}
+.ph h2{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.13em;text-transform:uppercase;color:var(--txt2)}
+.badge{font-family:var(--mono);font-size:10px;font-weight:700;padding:1px 7px;border-radius:2px}
+.b-blue{background:rgba(56,189,248,.1);color:var(--blue);border:1px solid rgba(56,189,248,.25)}
+.b-red{background:rgba(244,63,94,.1);color:var(--red);border:1px solid rgba(244,63,94,.25)}
+table{width:100%;border-collapse:collapse}
+thead tr{background:var(--bg-card)}
+th{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--txt3);padding:9px 14px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none;transition:color .15s}
+th:hover,th.sorted{color:var(--amber)}
+tbody tr{border-bottom:1px solid var(--border);transition:background .1s}
+tbody tr:last-child{border-bottom:none}
+tbody tr:hover{background:var(--bg-hover)}
+td{padding:10px 14px;font-size:13px;vertical-align:middle}
+.cn{font-weight:600;color:var(--txt)}
+.cn small{display:block;font-family:var(--mono);font-size:10px;color:var(--txt3);font-weight:400;margin-top:2px}
+.mono{font-family:var(--mono);font-size:12px;color:var(--txt2)}
+.pill{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;padding:2px 8px;border-radius:2px;white-space:nowrap}
+.pip{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.p-run{background:rgba(34,211,160,.12);color:var(--green);border:1px solid rgba(34,211,160,.3)} .p-run .pip{background:var(--green);animation:blink .8s infinite}
+.p-sch{background:rgba(56,189,248,.10);color:var(--blue);border:1px solid rgba(56,189,248,.3)}  .p-sch .pip{background:var(--blue)}
+.p-pau{background:rgba(245,158,11,.10);color:var(--amber);border:1px solid rgba(245,158,11,.3)} .p-pau .pip{background:var(--amber)}
+.p-err{background:rgba(244,63,94,.12);color:var(--red);border:1px solid rgba(244,63,94,.3)}     .p-err .pip{background:var(--red);animation:blink .6s infinite}
+.p-off{background:rgba(74,85,104,.15);color:var(--gray-lt);border:1px solid rgba(74,85,104,.4)} .p-off .pip{background:var(--gray)}
+.p-bld{background:rgba(167,139,250,.10);color:var(--purple);border:1px solid rgba(167,139,250,.3)} .p-bld .pip{background:var(--purple);animation:blink 1.2s infinite}
+tr.row-err td{background:rgba(244,63,94,.02)} tr.row-err:hover td{background:rgba(244,63,94,.06)}
+.errc{font-family:var(--mono);font-size:11px;color:var(--red);max-width:300px;line-height:1.4}
+.errnone{font-family:var(--mono);font-size:11px;color:var(--txt3)}
+.xbtn{background:none;border:1px solid var(--border-hi);border-radius:2px;color:var(--txt3);font-family:var(--mono);font-size:10px;padding:2px 8px;cursor:pointer;transition:all .15s}
+.xbtn:hover{border-color:var(--amber-dim);color:var(--amber)}
+.drow{display:none;background:#0d1117}
+.drow.open{display:table-row}
+.dinner{padding:16px 18px 20px 36px;border-top:1px solid var(--border)}
+.dgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px 22px;margin-bottom:16px}
+.di label{font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--txt3);display:block;margin-bottom:2px}
+.di span{font-family:var(--mono);font-size:11px;color:var(--txt2);word-break:break-all}
+.dlbl{font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:var(--txt3);margin-bottom:7px}
+.htable{width:100%;border:1px solid var(--border);border-radius:2px;overflow:hidden;margin-top:8px;font-size:11px}
+.htable th{font-size:9px;padding:6px 10px;background:#0a0c0e}
+.htable td{padding:6px 10px;font-family:var(--mono);font-size:11px;border-bottom:1px solid var(--border)}
+.htable tbody tr:last-child td{border-bottom:none}
+.empty{padding:40px;text-align:center;color:var(--txt3);font-family:var(--mono);font-size:12px}
+.footer{margin-top:32px;padding-top:14px;border-top:1px solid var(--border);display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--txt3)}
+@media(max-width:1100px){.stats{grid-template-columns:repeat(3,1fr)}.dgrid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:720px){.stats{grid-template-columns:1fr 1fr}th,td{padding:7px 9px}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.shell>*{animation:fadeUp .3s ease both}
+</style>
+</head>
+<body>
+
+<textarea id="__data" style="display:none">%%=v(@jsonData)=%%</textarea>
+
+<div class="shell">
+
+  <header class="header">
+    <div class="hex"></div>
+    <div class="ht"><strong>Automation Diagnostics</strong>Marketing Cloud &middot; WSProxy Intelligence Layer</div>
+    <div class="hr">
+      <div class="live"><span class="dot"></span>LIVE DATA</div>
+      <div id="ts"></div>
+    </div>
+  </header>
+
+  <div class="dbgbar" id="dbgbar">
+    <span class="dbglbl">WSProxy Debug</span>
+    <span>Automations: <strong id="dbg-auto">—</strong></span>
+    <span>Instances: <strong id="dbg-inst">—</strong></span>
+    <span id="dbg-err" style="color:var(--red);display:none"></span>
+    <button class="dbghide" onclick="document.getElementById('dbgbar').style.display='none'">Hide</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat s-total" onclick="filterTable('ALL')">     <div class="slbl">Total</div>            <div class="sval" id="c-total">—</div><div class="ssub">all automations</div></div>
+    <div class="stat s-run"   onclick="filterTable('RUNNING')"> <div class="slbl">Running / Active</div><div class="sval" id="c-run">—</div>  <div class="ssub">click to filter</div></div>
+    <div class="stat s-err"   onclick="filterTable('ERROR')">   <div class="slbl">Errored</div>          <div class="sval" id="c-err">—</div>  <div class="ssub">click to filter</div></div>
+    <div class="stat s-pau"   onclick="filterTable('PAUSED')">  <div class="slbl">Paused</div>           <div class="sval" id="c-pau">—</div>  <div class="ssub">click to filter</div></div>
+    <div class="stat s-off"   onclick="filterTable('INACTIVE')"><div class="slbl">Inactive / Draft</div><div class="sval" id="c-off">—</div>  <div class="ssub">click to filter</div></div>
+  </div>
+
+  <div class="toolbar">
+    <span class="tlbl">Filter:</span>
+    <button class="fbtn on"  id="fb-ALL"       onclick="filterTable('ALL')">All</button>
+    <button class="fbtn"     id="fb-RUNNING"   onclick="filterTable('RUNNING')">Running</button>
+    <button class="fbtn"     id="fb-SCHEDULED" onclick="filterTable('SCHEDULED')">Scheduled</button>
+    <button class="fbtn"     id="fb-PAUSED"    onclick="filterTable('PAUSED')">Paused</button>
+    <button class="fbtn"     id="fb-ERROR"     onclick="filterTable('ERROR')">Error</button>
+    <button class="fbtn"     id="fb-INACTIVE"  onclick="filterTable('INACTIVE')">Inactive</button>
+    <div class="sw">
+      <span class="sico">&#x2315;</span>
+      <input type="text" id="srch" placeholder="Search automations&hellip;" oninput="searchTable(this.value)">
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="ph">
+      <h2>Automation Registry</h2>
+      <span class="badge b-blue" id="tbl-cnt">0 automations</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th onclick="sortBy(0)">Name <span id="s0">&#x21D5;</span></th>
+          <th onclick="sortBy(1)">Status <span id="s1">&#x21D5;</span></th>
+          <th onclick="sortBy(2)">Type <span id="s2">&#x21D5;</span></th>
+          <th onclick="sortBy(3)">Last Run <span id="s3">&#x21D5;</span></th>
+          <th onclick="sortBy(4)">Next Scheduled <span id="s4">&#x21D5;</span></th>
+          <th>Last Error</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <div class="panel" id="err-panel" style="display:none">
+    <div class="ph">
+      <h2>Error Log &mdash; Instance Level</h2>
+      <span class="badge b-red" id="err-cnt">0 errors</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Automation</th><th>Run Start</th><th>Completed</th>
+          <th>Status</th><th>Error Message</th><th>Complete</th>
+        </tr>
+      </thead>
+      <tbody id="err-body"></tbody>
+    </table>
+  </div>
+
+  <footer class="footer">
+    <span>Marketing Cloud Automation Diagnostics &middot; WSProxy v2</span>
+    <span id="gen-ts"></span>
+  </footer>
+</div>
+
+<script>
+(function () {
+
+  /* ── Status map ───────────────────────────────────────────────── */
+  var SM = {
+    "-1":{ lbl:"Error",     cls:"p-err" },
+     "0":{ lbl:"Building",  cls:"p-bld" },
+     "1":{ lbl:"Inactive",  cls:"p-off" },
+     "2":{ lbl:"Active",    cls:"p-sch" },
+     "3":{ lbl:"Running",   cls:"p-run" },
+     "4":{ lbl:"Paused",    cls:"p-pau" },
+     "5":{ lbl:"Stopping",  cls:"p-pau" },
+     "6":{ lbl:"Scheduled", cls:"p-sch" },
+     "7":{ lbl:"Inactive",  cls:"p-off" },
+     "8":{ lbl:"Error",     cls:"p-err" }
+  };
+
+  var FG = {
+    ALL:[-1,0,1,2,3,4,5,6,7,8],
+    RUNNING:[3],
+    SCHEDULED:[2,6],
+    PAUSED:[4],
+    ERROR:[-1,8],
+    INACTIVE:[0,1,5,7]
+  };
+
+  /* ── State ────────────────────────────────────────────────────── */
+  var D = { automations:[], instances:[], debug:{}, error:null };
+  var instMap = {};
+  var curFilter = "ALL", curSearch = "", sortCol = -1, sortAsc = true;
+
+  /* ── Parse server data ────────────────────────────────────────── */
+  try {
+    var raw = document.getElementById("__data").value;
+    D = JSON.parse(raw);
+  } catch(e) {
+    D.error = "JSON parse failed: " + e.message;
+  }
+
+  /* ── Timestamps ───────────────────────────────────────────────── */
+  var now = new Date();
+  setText("ts",      "Loaded: " + fmtDT(now));
+  setText("gen-ts",  "Generated " + fmtDT(now));
+
+  /* ── Debug counts ─────────────────────────────────────────────── */
+  var dbg = D.debug || {};
+  setText("dbg-auto", dbg.automations ? dbg.automations.count + " rows / " + dbg.automations.pages + "pg" : "—");
+  setText("dbg-inst", dbg.instances   ? dbg.instances.count   + " rows / " + dbg.instances.pages   + "pg" : "—");
+
+  if (D.error) {
+    var el = document.getElementById("dbg-err");
+    if (el) { el.style.display = ""; el.textContent = "Error: " + D.error; }
+    document.getElementById("tbody").innerHTML =
+      '<tr><td colspan="7"><div class="empty" style="color:var(--red)">WSProxy error: ' + esc(D.error) + '</div></td></tr>';
+    return;
+  }
+
+  /* ── Build instance map keyed by TaskProgramID ────────────────── */
+  (D.instances || []).forEach(function(inst) {
+    var key = inst.TaskProgramID || "";
+    if (!key) return;
+    if (!instMap[key]) instMap[key] = [];
+    instMap[key].push(inst);
+  });
+  /* Sort each bucket: newest first */
+  Object.keys(instMap).forEach(function(k) {
+    instMap[k].sort(function(a, b) {
+      return new Date(b.StartTime || 0) - new Date(a.StartTime || 0);
+    });
+  });
+
+  /* ── Stats ────────────────────────────────────────────────────── */
+  function calcStats(autos) {
+    var run = 0, err = 0, pau = 0, off = 0;
+    autos.forEach(function(a) {
+      var s = +a.Status;
+      if (s === 3 || s === 2 || s === 6) run++;
+      else if (s === -1 || s === 8)      err++;
+      else if (s === 4)                  pau++;
+      else                               off++;
+    });
+    return { run:run, err:err, pau:pau, off:off };
+  }
+
+  function refreshStats() {
+    var st = calcStats(D.automations);
+    setText("c-total", D.automations.length);
+    setText("c-run",   st.run);
+    setText("c-err",   st.err);
+    setText("c-pau",   st.pau);
+    setText("c-off",   st.off);
+  }
+
+  /* ── Filter ───────────────────────────────────────────────────── */
+  function getFiltered() {
+    var statuses = FG[curFilter] || FG.ALL;
+    var q = curSearch.toLowerCase().trim();
+    return (D.automations || []).filter(function(a) {
+      if (statuses.indexOf(+a.Status) === -1) return false;
+      if (q) {
+        return ((a.Name||"") + " " + (a.Description||"") + " " + (a.CustomerKey||""))
+          .toLowerCase().indexOf(q) !== -1;
+      }
+      return true;
+    });
+  }
+
+  /* ── Sort ─────────────────────────────────────────────────────── */
+  function doSort(autos) {
+    if (sortCol < 0) return autos;
+    return autos.slice().sort(function(a, b) {
+      var va, vb;
+      if (sortCol === 0) { va = a.Name||""; vb = b.Name||""; }
+      else if (sortCol === 1) { va = +a.Status; vb = +b.Status; }
+      else if (sortCol === 2) { va = a.AutomationType||""; vb = b.AutomationType||""; }
+      else if (sortCol === 3) { va = new Date(a.LastRunTime||0); vb = new Date(b.LastRunTime||0); }
+      else if (sortCol === 4) { va = new Date(a.ScheduledTime||0); vb = new Date(b.ScheduledTime||0); }
+      if (va < vb) return sortAsc ? -1 : 1;
+      if (va > vb) return sortAsc ?  1 : -1;
+      return 0;
+    });
+  }
+
+  /* ── Render main table ────────────────────────────────────────── */
+  function render() {
+    var filtered = getFiltered();
+    var sorted   = doSort(filtered);
+    setText("tbl-cnt", sorted.length + " automation" + (sorted.length !== 1 ? "s" : ""));
+
+    if (!sorted.length) {
+      document.getElementById("tbody").innerHTML =
+        '<tr><td colspan="7"><div class="empty">No automations match this filter.</div></td></tr>';
+      return;
+    }
+
+    var html = "";
+    sorted.forEach(function(auto, idx) {
+      /* ProgramID is the key that matches AutomationInstance.TaskProgramID */
+      var pid    = auto.ProgramID || auto.CustomerKey || "";
+      var s      = +auto.Status;
+      var isErr  = (s === -1 || s === 8);
+      var info   = SM[String(s)] || { lbl:"Unknown("+s+")", cls:"p-off" };
+      var insts  = instMap[pid] || [];
+      var errI   = insts.filter(function(i) {
+        return +i.Status === -1 || +i.Status === 8 || (i.StatusMessage && i.StatusMessage.trim());
+      });
+      var lastErr  = errI.length ? (errI[0].StatusMessage || "Error") : "";
+      var lastRun  = auto.LastRunTime  ? fmtDT(new Date(auto.LastRunTime))  : "—";
+      var nextSch  = auto.ScheduledTime ? fmtDT(new Date(auto.ScheduledTime)) : "—";
+
+      html +=
+        '<tr class="' + (isErr ? "row-err" : "") + '">' +
+        '<td class="cn">' + esc(auto.Name || "(unnamed)") +
+          (auto.Description
+            ? '<small>' + esc(auto.Description.substring(0,60)) + (auto.Description.length>60?"...":"") + '</small>'
+            : "") +
+        '</td>' +
+        '<td><span class="pill ' + info.cls + '"><span class="pip"></span>' + info.lbl + '</span></td>' +
+        '<td class="mono">' + esc(cap(auto.AutomationType || "scheduled")) + '</td>' +
+        '<td class="mono">' + lastRun + '</td>' +
+        '<td class="mono" style="color:var(--blue)">' + nextSch + '</td>' +
+        (lastErr
+          ? '<td><div class="errc">' + esc(lastErr.substring(0,80)) + (lastErr.length>80?"...":"") + '</div></td>'
+          : '<td><div class="errnone">&#8212;</div></td>') +
+        '<td><button class="xbtn" data-idx="' + idx + '" onclick="toggleDetail(this)">&#9658; Details</button></td>' +
+        '</tr>' +
+        '<tr class="drow" id="dr-' + idx + '"><td colspan="7">' + buildDetail(auto, pid) + '</td></tr>';
+    });
+
+    document.getElementById("tbody").innerHTML = html;
+  }
+
+  /* ── Detail drawer ────────────────────────────────────────────── */
+  function buildDetail(auto, pid) {
+    var insts = (instMap[pid] || []).slice(0, 10);
+    var h = '<div class="dinner"><div class="dgrid">';
+    h += di("Program ID",     auto.ProgramID    || "—");
+    h += di("Customer Key",   auto.CustomerKey  || "—");
+    h += di("Category ID",    auto.CategoryID   || "—");
+    h += di("Is Active",      auto.IsActive != null ? String(auto.IsActive) : "—");
+    h += di("Created",        auto.CreatedDate  ? fmtDT(new Date(auto.CreatedDate))  : "—");
+    h += di("Modified",       auto.ModifiedDate ? fmtDT(new Date(auto.ModifiedDate)) : "—");
+    h += di("Last Save",      auto.LastSaveDate ? fmtDT(new Date(auto.LastSaveDate)) : "—");
+    h += di("Auto Type",      auto.AutomationType || "—");
+    h += di("Recurrence ID",  auto.RecurrenceID || "—");
+    h += '</div>';
+
+    if (insts.length) {
+      h += '<div class="dlbl" style="margin-top:14px">RUN HISTORY (last ' + insts.length + ')</div>';
+      h += '<table class="htable"><thead><tr><th>#</th><th>Status</th><th>Start</th><th>Completed</th><th>Done</th><th>Message</th></tr></thead><tbody>';
+      insts.forEach(function(inst, i) {
+        var is  = +inst.Status;
+        var ii  = SM[String(is)] || { lbl:"?", cls:"p-off" };
+        var isE = (is === -1 || is === 8);
+        h += '<tr' + (isE ? ' style="color:var(--red)"' : '') + '>' +
+             '<td>' + (i+1) + '</td>' +
+             '<td><span class="pill ' + ii.cls + '" style="font-size:9px;padding:1px 6px"><span class="pip"></span>' + ii.lbl + '</span></td>' +
+             '<td>' + (inst.StartTime     ? fmtDT(new Date(inst.StartTime))     : "—") + '</td>' +
+             '<td>' + (inst.CompletedTime ? fmtDT(new Date(inst.CompletedTime)) : "—") + '</td>' +
+             '<td>' + (inst.IsComplete != null ? (inst.IsComplete ? "&#10003;" : "&#10007;") : "—") + '</td>' +
+             '<td style="max-width:260px;word-break:break-word">' + esc((inst.StatusMessage||"").substring(0,120)) + '</td>' +
+             '</tr>';
+      });
+      h += '</tbody></table>';
+    } else {
+      h += '<div class="dlbl" style="margin-top:12px;color:var(--txt3)">No run history found in AutomationInstance.</div>';
+    }
+
+    h += '</div>';
+    return h;
+  }
+
+  /* ── Error log panel ──────────────────────────────────────────── */
+  function renderErrorLog() {
+    var rows = [];
+    (D.instances || []).forEach(function(inst) {
+      var is = +inst.Status;
+      if (is === -1 || is === 8 || (inst.StatusMessage && inst.StatusMessage.trim())) {
+        var pid = inst.TaskProgramID || "";
+        var match = (D.automations || []).filter(function(a) {
+          return a.ProgramID === pid || a.CustomerKey === pid;
+        });
+        rows.push({ inst: inst, name: match.length ? match[0].Name : "—" });
+      }
+    });
+
+    if (!rows.length) return;
+    document.getElementById("err-panel").style.display = "block";
+    setText("err-cnt", rows.length + " error" + (rows.length !== 1 ? "s" : ""));
+
+    var h = "";
+    rows.forEach(function(r) {
+      var is = +r.inst.Status;
+      var ii = SM[String(is)] || { lbl:"?", cls:"p-off" };
+      h += '<tr>' +
+           '<td class="cn">' + esc(r.name) + '</td>' +
+           '<td class="mono">' + (r.inst.StartTime     ? fmtDT(new Date(r.inst.StartTime))     : "—") + '</td>' +
+           '<td class="mono">' + (r.inst.CompletedTime ? fmtDT(new Date(r.inst.CompletedTime)) : "—") + '</td>' +
+           '<td><span class="pill ' + ii.cls + '"><span class="pip"></span>' + ii.lbl + '</span></td>' +
+           '<td class="errc">' + esc(r.inst.StatusMessage || "No message") + '</td>' +
+           '<td class="mono">' + (r.inst.IsComplete != null ? (r.inst.IsComplete ? "&#10003;" : "&#10007;") : "—") + '</td>' +
+           '</tr>';
+    });
+    document.getElementById("err-body").innerHTML = h;
+  }
+
+  /* ── Global handlers ──────────────────────────────────────────── */
+  window.filterTable = function(grp) {
+    curFilter = grp;
+    document.querySelectorAll(".fbtn").forEach(function(b) { b.classList.remove("on"); });
+    var btn = document.getElementById("fb-" + grp);
+    if (btn) btn.classList.add("on");
+    render();
+  };
+
+  window.sortBy = function(col) {
+    if (sortCol === col) sortAsc = !sortAsc;
+    else { sortCol = col; sortAsc = true; }
+    for (var i = 0; i < 5; i++) {
+      var el = document.getElementById("s" + i);
+      if (el) el.textContent = (i === col) ? (sortAsc ? "\u2191" : "\u2193") : "\u21D5";
+    }
+    render();
+  };
+
+  window.searchTable  = function(v) { curSearch = v; render(); };
+
+  window.toggleDetail = function(btn) {
+    var idx = btn.getAttribute("data-idx");
+    var row = document.getElementById("dr-" + idx);
+    if (!row) return;
+    var open = row.classList.contains("open");
+    row.classList.toggle("open", !open);
+    btn.innerHTML = open ? "&#9658; Details" : "&#9660; Close";
+  };
+
+  /* ── Utilities ────────────────────────────────────────────────── */
+  function setText(id, v) { var el = document.getElementById(id); if (el) el.textContent = v; }
+
+  function fmtDT(d) {
+    if (!d || isNaN(d)) return "—";
+    return d.toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" }) + " " +
+           d.toLocaleTimeString("en-GB", { hour:"2-digit", minute:"2-digit", second:"2-digit" });
+  }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+  }
+
+  function di(lbl, val) {
+    return '<div class="di"><label>' + esc(lbl) + '</label><span>' + esc(val) + '</span></div>';
+  }
+
+  function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+
+  /* ── Boot ─────────────────────────────────────────────────────── */
+  render();
+  renderErrorLog();
+  refreshStats();
+
+}());
+</script>
+</body>
+</html>
